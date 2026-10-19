@@ -5,6 +5,9 @@
 ; shortcut: wrapping crosses intermediate desktops, use a shell API for direct jumps.
 ; Desktop registry layout: https://github.com/pmb6tz/windows-desktop-switcher
 
+; Win+Shift+Tab opens the normal Windows Task View.
+$#+Tab::Send("#{Tab}")
+
 $#Tab:: {
 	try {
 		SwitchDesktop()

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-Rebuilds every .ahk script under ahk into the bin directory.
+Rebuilds every .ahk script under ahk into bin and copies the executables to the current user's Startup folder.
 .PARAMETER CompilerPath
 Path to Ahk2Exe.exe, if it is not installed in a standard location.
 .PARAMETER BasePath
@@ -77,6 +77,16 @@ if ($scripts.Count -eq 0) {
     throw "No AutoHotkey scripts were found in $sourceRoot."
 }
 
+$startupRoot = [Environment]::GetFolderPath('Startup')
+if ([string]::IsNullOrWhiteSpace($startupRoot)) {
+    throw 'The current user''s Startup folder could not be found.'
+}
+$duplicateNames = @($scripts | Group-Object BaseName | Where-Object Count -gt 1)
+if ($duplicateNames.Count -gt 0) {
+    throw "Scripts must have unique filenames for the Startup folder. Duplicate names: $($duplicateNames.Name -join ', ')."
+}
+$compiledPaths = @()
+
 foreach ($script in $scripts) {
     $relativePath = $script.FullName.Substring($sourceRoot.Length + 1)
     $outputPath = Join-Path $outputRoot ([IO.Path]::ChangeExtension($relativePath, '.exe'))
@@ -99,6 +109,13 @@ foreach ($script in $scripts) {
     if (!(Test-Path -LiteralPath $outputPath -PathType Leaf)) {
         throw "The compiler did not create $outputPath."
     }
+    $compiledPaths += $outputPath
 }
 
 Write-Host "Compiled $($scripts.Count) script(s) into $outputRoot"
+
+New-Item -ItemType Directory -Path $startupRoot -Force | Out-Null
+foreach ($compiledPath in $compiledPaths) {
+    Copy-Item -LiteralPath $compiledPath -Destination $startupRoot -Force
+}
+Write-Host "Copied $($compiledPaths.Count) executable(s) into $startupRoot"

@@ -1,9 +1,9 @@
-#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0 64-bit
 #SingleInstance Force
 
 ; Hold either Windows key and tap Tab to cycle desktops in Task View order.
-; shortcut: wrapping crosses intermediate desktops, use a shell API for direct jumps.
-; Desktop registry layout: https://github.com/pmb6tz/windows-desktop-switcher
+; Switch directly, including when wrapping from the last desktop to the first.
+; Uses https://github.com/Ciantic/VirtualDesktopAccessor
 
 ; Win+Shift+Tab opens the normal Windows Task View.
 $#+Tab::Send("#{Tab}")
@@ -21,61 +21,89 @@ $#Tab:: {
 }
 
 SwitchDesktop() {
+	api := GetDesktopApi()
 	state := GetDesktopState()
 	if (state.Count = 1) {
 		return
 	}
 
-	wrapping := state.Index = state.Count
-	steps := wrapping ? state.Count - 1 : 1
+	; VirtualDesktopAccessor uses zero-based desktop numbers.
+	nextIndex := Mod(state.Index + 1, state.Count)
+	if (DllCall(api.GoToDesktopNumber, "Int", nextIndex, "Int") = -1) {
+		throw Error("Windows could not switch desktops.")
+	}
 
-	Loop steps {
-		expectedIndex := wrapping ? state.Index - A_Index : state.Index + 1
-		Send(wrapping ? "#^{Left}" : "#^{Right}")
-
-		; Explorer processes desktop switches asynchronously.
-		deadline := A_TickCount + 1500
-		while (GetDesktopState().Index != expectedIndex) {
-			if (A_TickCount >= deadline) {
-				throw Error("Windows did not finish switching desktops.")
-			}
-			Sleep(25)
+	; Explorer processes desktop switches asynchronously.
+	deadline := A_TickCount + 1500
+	while (GetDesktopState().Index != nextIndex) {
+		if (A_TickCount >= deadline) {
+			throw Error("Windows did not finish switching desktops.")
 		}
-		Sleep(150)
+		Sleep(25)
 	}
 }
 
 GetDesktopState() {
-	key := "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops"
-	ids := RegRead(key, "VirtualDesktopIDs")
-	currentId := RegRead(key, "CurrentVirtualDesktop", "")
-
-	; Windows 10 stores the current desktop under the Windows session instead.
-	if (currentId = "") {
-		sessionId := 0
-		if !DllCall("ProcessIdToSessionId", "UInt", DllCall("GetCurrentProcessId", "UInt"), "UInt*", &sessionId) {
-			throw OSError()
-		}
-		key := "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\SessionInfo\" sessionId "\VirtualDesktops"
-		currentId := RegRead(key, "CurrentVirtualDesktop")
+	api := GetDesktopApi()
+	count := DllCall(api.GetDesktopCount, "Int")
+	index := DllCall(api.GetCurrentDesktopNumber, "Int")
+	if (count < 1 || index < 0 || index >= count) {
+		throw Error("Could not read Windows desktops. VirtualDesktopAccessor requires Windows build 26100.2605 or newer.")
 	}
 
-	return ParseDesktopState(ids, currentId)
+	return {Index: index, Count: count}
 }
 
-ParseDesktopState(ids, currentId) {
-	; RegRead returns each 16-byte desktop GUID as 32 hexadecimal characters.
-	if (StrLen(currentId) != 32 || StrLen(ids) = 0 || Mod(StrLen(ids), 32)) {
-		throw Error("Windows returned an invalid desktop list.")
-	}
+GetDesktopApi() {
+	static api := LoadDesktopApi()
+	return api
+}
 
-	count := StrLen(ids) // 32
-	Loop count {
-		if (SubStr(ids, (A_Index - 1) * 32 + 1, 32) = currentId) {
-			return {Index: A_Index, Count: count}
+LoadDesktopApi() {
+	directory := A_ScriptDir "\lib"
+	tempDirectory := ""
+	module := 0
+	try {
+		if A_IsCompiled {
+			; Embed the DLL so the executable can also run alone from Startup.
+			tempDirectory := A_Temp "\DesktopSwitcher-" DllCall("GetCurrentProcessId", "UInt") "-" A_TickCount
+			directory := tempDirectory
+			DirCreate(directory)
+			FileInstall("lib\VirtualDesktopAccessor.dll", directory "\VirtualDesktopAccessor.dll")
+			FileInstall("lib\VirtualDesktopAccessor.LICENSE.txt", directory "\VirtualDesktopAccessor.LICENSE.txt")
 		}
-	}
 
-	throw Error("The current desktop is missing from Windows' desktop list.")
+		; Load only this DLL and dependencies from its directory or System32.
+		module := DllCall("LoadLibraryExW", "Str", directory "\VirtualDesktopAccessor.dll", "Ptr", 0, "UInt", 0x900, "Ptr")
+		if !module {
+			throw Error("Could not load VirtualDesktopAccessor.dll. Windows error " A_LastError ". Restore ahk\lib, then rebuild if using the executable.")
+		}
+
+		api := {}
+		for name in ["GetDesktopCount", "GetCurrentDesktopNumber", "GoToDesktopNumber"] {
+			address := DllCall("GetProcAddress", "Ptr", module, "AStr", name, "Ptr")
+			if !address {
+				throw Error("VirtualDesktopAccessor.dll is missing " name ".")
+			}
+			api.%name% := address
+		}
+
+		OnExit((*) => UnloadDesktopApi(module, tempDirectory))
+		return api
+	} catch {
+		UnloadDesktopApi(module, tempDirectory)
+		throw
+	}
+}
+
+UnloadDesktopApi(module, tempDirectory) {
+	if module {
+		DllCall("FreeLibrary", "Ptr", module)
+	}
+	if (tempDirectory != "") {
+		try FileDelete(tempDirectory "\VirtualDesktopAccessor.dll")
+		try FileDelete(tempDirectory "\VirtualDesktopAccessor.LICENSE.txt")
+		try DirDelete(tempDirectory)
+	}
 }
 
